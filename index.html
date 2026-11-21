@@ -50,7 +50,10 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
 .last{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
 .last:last-child{border:0}
 .dot{width:10px;height:10px;border-radius:50%;flex:none}
-.d-OK{background:var(--ok)}.d-DUPLICADO{background:var(--warn)}.d-OBSERVADO{background:var(--bad)}
+.d-OK{background:var(--ok)}.d-ANULADO{background:#9ca3af}.last s{color:var(--mut)}
+.anu{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 8px;font:600 12px system-ui;color:var(--bad);cursor:pointer}
+.pill.lv{background:var(--red)}
+#auth{position:fixed;inset:0;background:rgba(11,40,71,.9);display:none;align-items:center;justify-content:center;z-index:70;padding:20px}#auth.show{display:flex}#auth .card{width:100%;max-width:380px}#auth input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);font:22px ui-monospace,monospace;letter-spacing:4px;text-align:center;margin:6px 0 12px}.d-DUPLICADO{background:var(--warn)}.d-OBSERVADO{background:var(--bad)}
 .team{border:1px solid var(--line);border-radius:10px;margin-bottom:8px;overflow:hidden}
 .team summary{padding:9px 10px;font-weight:700;cursor:pointer;display:flex;gap:8px;align-items:center}
 .team summary em{margin-left:auto;font-style:normal;font-size:12px;padding:2px 8px;border-radius:99px;background:#fee2e2;color:#991b1b}
@@ -76,6 +79,7 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
 <header>
   <div><b>Asistencia · Semana Civil 2026</b><small id="who">-</small></div>
   <div class="sp"></div>
+  <span id="lvl" class="pill lv hide"></span>
   <span id="net" class="pill">En línea</span>
   <span id="pend" class="pill hide">0 por subir</span>
 </header>
@@ -130,6 +134,14 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
 
 <div id="flash"><div class="ic" id="fIc"></div><div class="t" id="fT"></div><div class="s" id="fS"></div><div class="plus hide" id="fP"></div><div class="act" id="fAct"></div></div>
 
+<div id="auth"><div class="card">
+  <h3>Autorizar registro tardío</h3>
+  <div class="hint" id="aTxt" style="margin-bottom:6px"></div>
+  <label>PIN de coordinador o admin</label><input id="aPin" type="password" inputmode="numeric" autocomplete="off">
+  <div class="row"><button class="btn sec" id="aNo" style="flex:1">Cancelar</button><button class="btn" id="aGo" style="flex:1">Autorizar</button></div>
+  <div class="hint" id="aErr" style="color:#b91c1c"></div>
+</div></div>
+
 <div id="modal"><div class="card">
   <h3>Antes de empezar</h3>
   <label>Tu nombre (encargado)</label><input id="mName" placeholder="Ej. Diego Ullilén">
@@ -144,8 +156,10 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
  * Vacío o ?demo=1 en la URL = modo DEMO con datos ficticios (no guarda nada).
  */
 const API = 'https://script.google.com/macros/s/AKfycbxNWfLY3ZUBAAEF-a_eo5tihSbAVytlAMDvEIJ6dBLBoijwPAfWvkdKsWkFg86pnpQ23g/exec';
-const VERSION = 'v0.2 · 21/11/2026';
-const ANTES_MIN = 30;     // una sesión se recomienda desde 30 min antes de su inicio
+const VERSION = 'v0.4 · 21/11/2026';
+const ANTES_MIN = 25;     // una sesión ya aparece activa desde 25 min antes de su inicio
+const DESPUES_MIN = 20;   // y sigue activa 20 min después de terminar (rezagados)
+const AUT_MIN = 10;       // una autorización de coordinador dura 10 min en esa actividad
 const REPETIR_MS = 3000;  // ignora el mismo QR leído dentro de 3 s
 const EXT = { XFUT: 'Fútbol', XL4D: 'Left 4 Dead 2', XBAN: 'Batalla de Bandas' };
 
@@ -157,7 +171,8 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem(PFX + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(PFX + k, JSON.stringify(v)); } catch (e) {} }
 };
-let D = null, ses = null, modo = 'dni';
+let D = null, ses = null, modo = 'dni', NIVEL = 'enc', aut = null;
+const NOMBRE_NIVEL = { enc: 'Encargado', coord: 'Coordinador', admin: 'Admin' }, RANGO = { enc: 1, coord: 2, admin: 3 };
 let porDni = {}, porCod = {};
 let cola = LS.get('cola', []);
 let marcas = LS.get('marcas', []);
@@ -185,12 +200,12 @@ function demoData() {
 
 /* ================= API ================= */
 async function cargar() {
-  if (DEMO) { D = demoData(); }
+  if (DEMO) { D = demoData(); NIVEL = qs.get('nivel') || 'enc'; }
   else {
     const r = await fetch(`${API}?accion=asistencia&pin=${encodeURIComponent(LS.get('pin', ''))}`);
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'No se pudo cargar');
-    D = j; LS.set('cache', D);
+    D = j; NIVEL = j.nivel || 'enc'; LS.set('cache', D);
     const ids = new Set(D.marcas.map(m => m.id));
     marcas = D.marcas.concat(cola.filter(m => !ids.has(m.id)));
   }
@@ -212,11 +227,17 @@ async function subir() {
 }
 
 /* ================= SESIONES ================= */
-function aFecha(f, h) { const [d, m, y] = String(f).split('/').map(Number), [hh, mm] = String(h || '00:00').split(':').map(Number); return new Date(y, m - 1, d, hh || 0, mm || 0); }
-const enCurso = s => new Date() >= aFecha(s.fecha, s.inicio);
+function aFecha(f, h) {
+  let d, m, y; const t = String(f || '').trim();
+  let x = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (x) { y = +x[1]; m = +x[2]; d = +x[3]; } else { x = t.match(/(\d{1,2})\D(\d{1,2})\D(\d{2,4})/) || [0, 0, 0, 0]; d = +x[1]; m = +x[2]; y = +x[3]; if (y < 100) y += 2000; }
+  const hm = String(h || '').match(/(\d{1,2})[:.](\d{2})/) || [0, 0, 0]; let hh = +hm[1];
+  if (/p\.?\s*m/i.test(h) && hh < 12) hh += 12;
+  return new Date(y, m - 1, d, hh, +hm[2]);
+}
 function sesionesAhora() {
   const now = new Date();
-  return D.horario.filter(s => now >= new Date(aFecha(s.fecha, s.inicio) - ANTES_MIN * 60000) && now <= aFecha(s.fecha, s.fin))
+  return D.horario.filter(s => now >= new Date(aFecha(s.fecha, s.inicio) - ANTES_MIN * 60000) && now <= new Date(+aFecha(s.fecha, s.fin) + DESPUES_MIN * 60000))
     .sort((x, y) => aFecha(x.fecha, x.inicio) - aFecha(y.fecha, y.inicio));
 }
 function proximas() { const now = new Date(); return D.horario.filter(s => aFecha(s.fecha, s.inicio) > now).sort((x, y) => aFecha(x.fecha, x.inicio) - aFecha(y.fecha, y.inicio)); }
@@ -226,13 +247,45 @@ function elegirInicial() {
     || (conc && (ahora.find(s => s.concurso === conc) || proximas().find(s => s.concurso === conc) || D.horario.find(s => s.concurso === conc)))
     || ahora.find(s => s.id === LS.get('ses', '')) || ahora[0] || proximas()[0] || D.horario[D.horario.length - 1];
 }
+const enCurso = s => { const n = new Date(); return n >= aFecha(s.fecha, s.inicio) && n <= aFecha(s.fecha, s.fin); };
+/* ---- permisos por nivel ---- */
+const hoyTxt = () => { const d = new Date(); return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2) + '/' + d.getFullYear(); };
+function abierta(s) { const n = new Date(); return n >= new Date(aFecha(s.fecha, s.inicio) - ANTES_MIN * 60000) && n <= new Date(+aFecha(s.fecha, s.fin) + DESPUES_MIN * 60000); }
+function permitido(s, nv) {
+  nv = nv || NIVEL;
+  if (nv === 'admin') return true;
+  if (nv === 'coord') return abierta(s) || s.fecha === hoyTxt();
+  return abierta(s);
+}
+const autVigente = () => aut && aut.ses === ses.id && Date.now() < aut.hasta;
+function pedirAut(txt) {
+  return new Promise(res => {
+    $('aTxt').textContent = txt; $('aPin').value = ''; $('aErr').textContent = '';
+    $('auth').classList.add('show'); setTimeout(() => $('aPin').focus(), 50);
+    $('aNo').onclick = () => { $('auth').classList.remove('show'); res(null); };
+    $('aGo').onclick = async () => {
+      const pin = $('aPin').value.trim(); if (!pin) return;
+      $('aErr').textContent = 'Verificando…';
+      try {
+        let nv = '';
+        if (DEMO) nv = pin === '48172' ? 'coord' : pin === '731926' ? 'admin' : '';
+        else { const j = await (await fetch(`${API}?accion=asistencia&solo=nivel&pin=${encodeURIComponent(pin)}`)).json(); nv = j.ok ? j.nivel : ''; }
+        if (!nv || RANGO[nv] < 2) return ($('aErr').textContent = 'PIN sin permiso (se necesita coordinador o admin).');
+        if (!permitido(ses, nv)) return ($('aErr').textContent = 'Un coordinador solo autoriza actividades de hoy. Pide el PIN admin.');
+        $('auth').classList.remove('show');
+        res({ ses: ses.id, pin, nv, hasta: Date.now() + AUT_MIN * 60000 });
+      } catch (e) { $('aErr').textContent = 'Sin internet: no se pudo verificar el PIN.'; }
+    };
+  });
+}
+
 const chip = s => `<span class="cr cr${s.creditos}">${s.creditos}</span>`;
 function pintarSesiones() {
   const ahora = sesionesAhora(), prox = ahora.length ? [] : proximas().slice(0, 3);
   $('sesTitle').textContent = ahora.length > 1 ? `Ahora hay ${ahora.length} actividades en simultáneo · elige la tuya` : ahora.length ? 'Recomendado a esta hora' : prox.length ? 'Nada en curso · próximas actividades' : 'No hay actividades programadas';
-  $('sesBtns').innerHTML = ahora.concat(prox).map(s => `<button data-id="${s.id}" class="${ses && s.id === ses.id ? 'on' : ''}">${chip(s)}<b>${s.nombre}</b><span><span class="now">● ${enCurso(s) && ahora.includes(s) ? 'en curso' : ahora.includes(s) ? 'por iniciar' : s.fecha}</span> · ${s.inicio}-${s.fin}${s.lugar ? ' · ' + s.lugar : ''}</span></button>`).join('');
+  $('sesBtns').innerHTML = ahora.concat(prox).map(s => `<button data-id="${s.id}" class="${ses && s.id === ses.id ? 'on' : ''}">${chip(s)}<b>${s.nombre}</b><span><span class="now">● ${!ahora.includes(s) ? s.fecha : enCurso(s) ? 'en curso' : new Date() < aFecha(s.fecha, s.inicio) ? 'por iniciar' : 'terminó · rezagados'}</span> · ${s.inicio}-${s.fin}${s.lugar ? ' · ' + s.lugar : ''}</span></button>`).join('');
   $('sesBtns').querySelectorAll('button').forEach(b => b.onclick = () => usar(b.dataset.id));
-  $('sesAll').innerHTML = '<option value="">Ver todas las actividades…</option>' + D.horario.map(s => `<option value="${s.id}" ${ses && s.id === ses.id ? 'selected' : ''}>${s.fecha.slice(0, 5)} ${s.inicio} · ${s.nombre} (${s.creditos} cr.)</option>`).join('');
+  $('sesAll').innerHTML = '<option value="">Ver todas las actividades…</option>' + D.horario.map(s => `<option value="${s.id}" ${ses && s.id === ses.id ? 'selected' : ''}>${permitido(s) ? '' : '🔒 '}${s.fecha.slice(0, 5)} ${s.inicio} · ${s.nombre} (${s.creditos} cr.)</option>`).join('');
 }
 function usar(id) { ses = D.horario.find(s => s.id === id) || ses; LS.set('ses', ses.id); pintarSesiones(); pintarTodo(); }
 
@@ -272,7 +325,16 @@ function porCodigo(txt, origen) {
   if (!p) return flash('BAD', '✖', 'Código no encontrado', `"${txt}" no es un código de inscrito.`, []);
   validar(p, origen);
 }
-function validar(p, origen) {
+async function validar(p, origen) {
+  if (!permitido(ses) && !autVigente()) {
+    const antes = new Date() < aFecha(ses.fecha, ses.inicio);
+    return flash('BAD', '🔒', antes ? 'Esta actividad aún no abre' : 'Esta actividad ya cerró',
+      `${p.n} · ${ses.nombre} (${ses.inicio}-${ses.fin}). Para registrarlo igual, un coordinador debe autorizar con su PIN.`,
+      [{ t: 'Autorizar con PIN', w: true, f: async () => {
+        const a = await pedirAut(`${p.n} → ${ses.nombre}. La autorización vale ${AUT_MIN} min para esta actividad.`);
+        if (a) { aut = a; validar(p, origen); }
+      } }]);
+  }
   const x = (p.c.split('-')[1] || '');
   if (x.startsWith('X') && !(ses.externos || []).includes(x)) {
     const motivo = `Externo: solo puede participar en ${EXT[x] || 'su concurso'}.`;
@@ -289,6 +351,11 @@ function marcar(p, resultado, origen, obs) {
   const m = { id: `${dev}-${now.getTime()}`, ts: now.toISOString(), hora: now.toTimeString().slice(0, 5), sesion: ses.id, actividad: ses.nombre,
     codigo: p.c, dni: p.d || '', nombre: p.n, equipo: eq ? eq.e : '', resultado, obs: obs || '', origen,
     encargado: LS.get('name', ''), dispositivo: dev, creditos: resultado === 'OK' ? ses.creditos : 0 };
+  if (!abierta(ses)) {
+    const quien = autVigente() ? NOMBRE_NIVEL[aut.nv] : NOMBRE_NIVEL[NIVEL] + ' ' + LS.get('name', '');
+    m.obs = 'Tardío · autorizó ' + quien + (m.obs ? ' · ' + m.obs : '');
+    if (autVigente()) { m.aut = aut.pin; m.autPor = quien; }
+  }
   marcas.push(m); LS.set('marcas', marcas.slice(-4000));
   if (!DEMO) { cola.push(m); LS.set('cola', cola); subir(); }
   if (resultado === 'OK') {
@@ -297,6 +364,24 @@ function marcar(p, resultado, origen, obs) {
   } else flash('DUP', '✔', 'Registrado como OBSERVADO', `${p.n} · no suma créditos`, []);
   if (modo === 'cod') setModo('dni');
   pintarTodo();
+}
+
+/* ================= ANULAR (coordinador / admin) ================= */
+async function anularMarca(id) {
+  const m = marcas.find(x => x.id === id); if (!m) return;
+  flash('ASK', '?', '¿Anular esta marca?', `${m.nombre} · ${m.hora}. Queda como ANULADO y no suma créditos.`, [{ t: 'Sí, anular', w: true, f: async () => {
+    const enCola = cola.some(x => x.id === id);
+    if (enCola) { cola = cola.filter(x => x.id !== id); LS.set('cola', cola); }
+    else if (!DEMO) {
+      try {
+        const j = await (await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ accion: 'anular', pin: LS.get('pin', ''), id, por: NOMBRE_NIVEL[NIVEL] + ' ' + LS.get('name', '') }) })).json();
+        if (!j.ok) return flash('BAD', '✖', 'No se pudo anular', j.error || '', []);
+      } catch (e) { return flash('BAD', '✖', 'Sin internet', 'Anula cuando vuelva la señal.', []); }
+    }
+    m.resultado = 'ANULADO'; m.obs = 'Anulado' + (m.obs ? ' · ' + m.obs : ''); LS.set('marcas', marcas.slice(-4000));
+    pintarTodo(); flash('DUP', '✔', 'Marca anulada', m.nombre, []);
+  } }]);
 }
 
 /* ================= PANTALLAS ================= */
@@ -310,8 +395,10 @@ function pintarTodo() {
   $('cnt').textContent = pr.size; $('cntLbl').textContent = 'presentes';
   $('tList').classList.toggle('hide', !eq.length);
   const mias = marcas.filter(m => m.sesion === ses.id).slice(-8).reverse();
-  $('last').innerHTML = mias.length ? mias.map(m => `<div class="last"><span class="dot d-${m.resultado}"></span><div style="flex:1"><b>${m.nombre}</b><br><span class="hint">${m.codigo}${m.equipo ? ' · ' + m.equipo : ''}${m.obs ? ' · ' + m.obs : ''}</span></div><span>${m.hora}</span></div>`).join('')
+  const puede = RANGO[NIVEL] >= 2;
+  $('last').innerHTML = mias.length ? mias.map(m => `<div class="last"><span class="dot d-${m.resultado}"></span><div style="flex:1">${m.resultado === 'ANULADO' ? '<s>' + m.nombre + '</s>' : '<b>' + m.nombre + '</b>'}<br><span class="hint">${m.codigo}${m.equipo ? ' · ' + m.equipo : ''}${m.obs ? ' · ' + m.obs : ''}</span></div><span>${m.hora}</span>${puede && m.resultado !== 'ANULADO' ? `<button class="anu" data-id="${m.id}">Anular</button>` : ''}</div>`).join('')
     : '<div class="hint">Aún no hay marcas en esta sesión.</div>';
+  $('last').querySelectorAll('.anu').forEach(b => b.onclick = () => anularMarca(b.dataset.id));
   if (!eq.length) return;
   const nombre = c => (porCod[c] || {}).n || c;
   const ids = [...new Set(eq.map(x => x.e))];
@@ -382,6 +469,7 @@ $('mDni').onclick = () => setModo('dni'); $('mCod').onclick = () => setModo('cod
 $('camStart').onclick = camOn; $('camStop').onclick = camOff;
 $('qGo').onclick = manual;
 $('q').onkeydown = e => { if (e.key === 'Enter') manual(); };
+$('aPin').onkeydown = e => { if (e.key === 'Enter') $('aGo').click(); };
 $('q').oninput = () => { const d = $('q').value.replace(/\D/g, ''); if ((modo === 'dni' && d.length === 8) || (modo === 'cod' && d.length === 5)) manual(); };
 $('sesAll').onchange = e => e.target.value && usar(e.target.value);
 $('chg').onclick = e => { e.preventDefault(); pedirDatos(true).then(iniciar); };
@@ -413,8 +501,19 @@ async function iniciar() {
   catch (e) {
     const c = LS.get('cache', null);
     if (c) { D = c; indexar(); flash('DUP', '!', 'Sin conexión', 'Usando la última lista descargada. Las marcas se subirán al volver el internet.', []); }
-    else { flash('BAD', '✖', 'No se pudo cargar la lista', e.message + ' · Revisa el PIN o el internet.', [{ t: 'Cambiar PIN', w: true, f: () => pedirDatos(true).then(iniciar) }]); return; }
+    else {
+      $('sesTitle').textContent = 'No se pudo cargar la lista';
+      $('sesBtns').innerHTML = `<div class="hint" style="color:#b91c1c">${e.message}</div><button class="btn" style="width:100%;margin-top:8px" onclick="iniciar()">Reintentar</button>`;
+      flash('BAD', '✖', 'No se pudo cargar la lista', e.message + ' · Revisa el PIN o el internet.', [{ t: 'Cambiar PIN', w: true, f: () => pedirDatos(true).then(iniciar) }]); return;
+    }
   }
+  if (!D.horario || !D.horario.length) {
+    $('sesTitle').textContent = 'El HORARIO está vacío';
+    $('sesBtns').innerHTML = '<div class="hint">Revisa la hoja HORARIO del Sheets (columna Activo = Sí) y toca Recargar datos.</div>';
+    return;
+  }
+  $('who').textContent = NOMBRE_NIVEL[NIVEL] + ': ' + LS.get('name', '');
+  $('lvl').textContent = NOMBRE_NIVEL[NIVEL]; $('lvl').classList.toggle('hide', NIVEL === 'enc');
   ses = elegirInicial();
   pintarSesiones(); pintarTodo(); pintarRed(); setModo('dni');
 }
