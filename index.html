@@ -73,6 +73,9 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
 #modal input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);font:inherit;margin:6px 0 12px}
 .foot{font-size:11px;color:var(--mut);text-align:center;margin:10px 0 30px}
 .hide{display:none!important}
+#loading{position:fixed;inset:0;background:rgba(241,243,246,.92);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;z-index:40;font-weight:700;color:var(--navy)}#loading.show{display:flex}
+.spin{width:42px;height:42px;border:4px solid #cbd5e1;border-top-color:var(--navy);border-radius:50%;animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.pill.prueba{background:#7c3aed}.grp{font-size:12px;color:#1d4ed8;font-weight:700}
 </style>
 </head>
 <body>
@@ -99,28 +102,28 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
   </section>
 
   <div class="tabs">
-    <button id="tMan" class="on">🪪 DNI / Código</button>
-    <button id="tScan">📷 QR</button>
+    <button id="tScan" class="on">📷 QR</button>
+    <button id="tMan">🔢 Código</button>
     <button id="tList" class="hide">👥 Equipos</button>
   </div>
 
-  <section class="card" id="pMan">
-    <div class="seg"><button id="mDni" class="on">DNI (8 dígitos)</button><button id="mCod">Código SC (últimos 5)</button></div>
+  <section class="card hide" id="pMan">
+    <div class="hint" id="qWarn" style="margin:0 0 8px;font-weight:600"></div>
     <div class="row">
-      <input class="inp" id="q" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="DNI">
+      <input class="inp" id="q" inputmode="numeric" autocomplete="off" maxlength="14" placeholder="últimos 5">
       <button class="btn" id="qGo">OK</button>
     </div>
-    <div class="hint" id="qHint">Escribe el DNI. Si no está registrado, se pedirá su código Semana Civil (últimos 5 dígitos).</div>
+    <div class="hint" id="qHint">Últimos 5 dígitos del código Semana Civil (ej. SC3-EST-28718 → 28718) o el código completo + Enter.</div>
     <div class="cand" id="cand"></div>
   </section>
 
-  <section class="card hide" id="pScan">
+  <section class="card" id="pScan">
     <div id="reader"></div>
     <div class="row" style="margin-top:8px">
       <button class="btn" id="camStart" style="flex:1">Activar cámara</button>
       <button class="btn sec hide" id="camStop">Detener</button>
     </div>
-    <div class="hint">Lee el QR o código de barras del fotocheck (código Semana Civil). Escaneo continuo.</div>
+    <div class="hint" id="scanHint">Escaneo continuo del QR del carnet. No hace falta tocar nada entre persona y persona.</div>
   </section>
 
   <section class="card hide" id="pList"><div id="teams"></div></section>
@@ -132,6 +135,7 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
   <div class="foot"><span id="ver"></span> · <a href="#" id="chg">Cambiar encargado</a> · <a href="#" id="rel">Recargar datos</a></div>
 </main>
 
+<div id="loading" class="show"><div class="spin"></div><div id="loadTxt">Cargando lista…</div></div>
 <div id="flash"><div class="ic" id="fIc"></div><div class="t" id="fT"></div><div class="s" id="fS"></div><div class="plus hide" id="fP"></div><div class="act" id="fAct"></div></div>
 
 <div id="auth"><div class="card">
@@ -156,11 +160,13 @@ h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;c
  * Vacío o ?demo=1 en la URL = modo DEMO con datos ficticios (no guarda nada).
  */
 const API = 'https://script.google.com/macros/s/AKfycbxNWfLY3ZUBAAEF-a_eo5tihSbAVytlAMDvEIJ6dBLBoijwPAfWvkdKsWkFg86pnpQ23g/exec';
-const VERSION = 'v0.4 · 21/11/2026';
+const VERSION = 'v0.5 · 21/11/2026';
 const ANTES_MIN = 25;     // una sesión ya aparece activa desde 25 min antes de su inicio
 const DESPUES_MIN = 20;   // y sigue activa 20 min después de terminar (rezagados)
 const AUT_MIN = 10;       // una autorización de coordinador dura 10 min en esa actividad
-const REPETIR_MS = 3000;  // ignora el mismo QR leído dentro de 3 s
+const REPETIR_MS = 4000;  // ignora el mismo QR leído dentro de 4 s
+const OK_MS = 1100;       // pantalla verde: corta para que el escaneo fluya
+const VIVO = 'QR no válido, usa tu carnet. NO TE PASES DE VIVO JEJEJE';
 const EXT = { XFUT: 'Fútbol', XL4D: 'Left 4 Dead 2', XBAN: 'Batalla de Bandas' };
 
 /* ================= ESTADO ================= */
@@ -171,7 +177,7 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem(PFX + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(PFX + k, JSON.stringify(v)); } catch (e) {} }
 };
-let D = null, ses = null, modo = 'dni', NIVEL = 'enc', aut = null;
+let D = null, ses = null, modo = 'cod', NIVEL = 'enc', aut = null, porHash = {}, procesando = false, subiendo = false, tSub = null;
 const NOMBRE_NIVEL = { enc: 'Encargado', coord: 'Coordinador', admin: 'Admin' }, RANGO = { enc: 1, coord: 2, admin: 3 };
 let porDni = {}, porCod = {};
 let cola = LS.get('cola', []);
@@ -199,31 +205,38 @@ function demoData() {
 }
 
 /* ================= API ================= */
-async function cargar() {
+async function cargar(fresh) {
   if (DEMO) { D = demoData(); NIVEL = qs.get('nivel') || 'enc'; }
   else {
-    const r = await fetch(`${API}?accion=asistencia&pin=${encodeURIComponent(LS.get('pin', ''))}`);
+    const r = await fetch(`${API}?accion=asistencia&pin=${encodeURIComponent(LS.get('pin', ''))}${fresh ? '&fresh=1' : ''}`);
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'No se pudo cargar');
-    D = j; NIVEL = j.nivel || 'enc'; LS.set('cache', D);
+    D = j; NIVEL = j.nivel || 'enc'; LS.set('cache', D); LS.set('nivel', NIVEL);
     const ids = new Set(D.marcas.map(m => m.id));
     marcas = D.marcas.concat(cola.filter(m => !ids.has(m.id)));
   }
   indexar();
 }
 function indexar() {
-  porDni = {}; porCod = {};
-  D.general.forEach(p => { if (p.d) porDni[p.d] = p; porCod[p.c] = p; });
+  porCod = {}; porHash = {};
+  D.general.forEach(p => { porCod[p.c] = p; if (p.h) porHash[p.h] = p; });
 }
+async function huella(t) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(t).trim().toUpperCase()));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('').slice(0, 20);
+}
+function programarSubida() { clearTimeout(tSub); tSub = setTimeout(subir, 1200); pintarRed(); }
 async function subir() {
-  if (DEMO || !cola.length || !navigator.onLine) return pintarRed();
+  if (DEMO || !cola.length || !navigator.onLine || subiendo) return pintarRed();
+  subiendo = true;
   try {
     const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ accion: 'marcar', pin: LS.get('pin', ''), registros: cola.slice(0, 50) }) });
     const j = await r.json();
     if (j.ok) { const ok = new Set(j.guardados); cola = cola.filter(m => !ok.has(m.id)); LS.set('cola', cola); }
   } catch (e) { /* se reintenta solo */ }
-  pintarRed();
+  subiendo = false; pintarRed();
+  if (cola.length && navigator.onLine) programarSubida();
 }
 
 /* ================= SESIONES ================= */
@@ -253,6 +266,7 @@ const hoyTxt = () => { const d = new Date(); return ('0' + d.getDate()).slice(-2
 function abierta(s) { const n = new Date(); return n >= new Date(aFecha(s.fecha, s.inicio) - ANTES_MIN * 60000) && n <= new Date(+aFecha(s.fecha, s.fin) + DESPUES_MIN * 60000); }
 function permitido(s, nv) {
   nv = nv || NIVEL;
+  if (s.prueba) return true;
   if (nv === 'admin') return true;
   if (nv === 'coord') return abierta(s) || s.fecha === hoyTxt();
   return abierta(s);
@@ -279,44 +293,54 @@ function pedirAut(txt) {
   });
 }
 
+const PRUEBA = () => ({ id: 'PRUEBA', nombre: 'PRUEBA (no guarda nada)', fecha: hoyTxt(), inicio: '00:00', fin: '23:59', creditos: 0, concurso: '', externos: ['XFUT', 'XL4D', 'XBAN'], lugar: '', grupo: '', virtual: false, prueba: true });
 const chip = s => `<span class="cr cr${s.creditos}">${s.creditos}</span>`;
 function pintarSesiones() {
   const ahora = sesionesAhora(), prox = ahora.length ? [] : proximas().slice(0, 3);
   $('sesTitle').textContent = ahora.length > 1 ? `Ahora hay ${ahora.length} actividades en simultáneo · elige la tuya` : ahora.length ? 'Recomendado a esta hora' : prox.length ? 'Nada en curso · próximas actividades' : 'No hay actividades programadas';
   $('sesBtns').innerHTML = ahora.concat(prox).map(s => `<button data-id="${s.id}" class="${ses && s.id === ses.id ? 'on' : ''}">${chip(s)}<b>${s.nombre}</b><span><span class="now">● ${!ahora.includes(s) ? s.fecha : enCurso(s) ? 'en curso' : new Date() < aFecha(s.fecha, s.inicio) ? 'por iniciar' : 'terminó · rezagados'}</span> · ${s.inicio}-${s.fin}${s.lugar ? ' · ' + s.lugar : ''}</span></button>`).join('');
   $('sesBtns').querySelectorAll('button').forEach(b => b.onclick = () => usar(b.dataset.id));
-  $('sesAll').innerHTML = '<option value="">Ver todas las actividades…</option>' + D.horario.map(s => `<option value="${s.id}" ${ses && s.id === ses.id ? 'selected' : ''}>${permitido(s) ? '' : '🔒 '}${s.fecha.slice(0, 5)} ${s.inicio} · ${s.nombre} (${s.creditos} cr.)</option>`).join('');
+  $('sesAll').innerHTML = '<option value="">Ver todas las actividades…</option>' + D.horario.map(s => `<option value="${s.id}" ${ses && s.id === ses.id ? 'selected' : ''}>${permitido(s) ? '' : '🔒 '}${s.fecha.slice(0, 5)} ${s.inicio} · ${s.nombre} (${s.creditos} cr.)${s.virtual ? ' · virtual' : ''}</option>`).join('')
+    + `<option value="PRUEBA" ${ses && ses.prueba ? 'selected' : ''}>🧪 PRUEBA · escanear sin guardar</option>`;
 }
-function usar(id) { ses = D.horario.find(s => s.id === id) || ses; LS.set('ses', ses.id); pintarSesiones(); pintarTodo(); }
+function usar(id) {
+  ses = id === 'PRUEBA' ? PRUEBA() : D.horario.find(s => s.id === id) || ses;
+  if (!ses.prueba) LS.set('ses', ses.id);
+  pintarSesiones(); pintarTodo(); ajustarModo();
+}
+/* virtual = solo código; presencial = QR primero (código queda como "Sin carnet") */
+function ajustarModo() {
+  $('tScan').classList.toggle('hide', !!ses.virtual);
+  $('qWarn').textContent = ses.virtual ? '💻 Actividad virtual: registra con el código Semana Civil.' : '⚠ Presencial: usa el QR del carnet. Por código queda como "Sin carnet".';
+  $('qWarn').style.color = ses.virtual ? '#1d4ed8' : '#b45309';
+  if (ses.virtual) tab('Man'); else if ($('pMan').classList.contains('hide') && $('pList').classList.contains('hide')) tab('Scan');
+}
+/* actividades que se marcan con un escaneo: la actual + las del mismo grupo que empiezan a la misma hora o después */
+function objetivos(s) {
+  if (!s.grupo || s.virtual || s.prueba) return [s];
+  const t0 = +aFecha(s.fecha, s.inicio);
+  return [s].concat(D.horario.filter(x => x.id !== s.id && x.grupo === s.grupo && x.fecha === s.fecha && +aFecha(x.fecha, x.inicio) >= t0)
+    .sort((a, b) => aFecha(a.fecha, a.inicio) - aFecha(b.fecha, b.inicio)));
+}
 
 /* ================= IDENTIFICAR ================= */
 const equipos = () => (ses.concurso && D.roster[ses.concurso]) || [];
 const equipoDe = c => equipos().find(x => x.c === c);
-function setModo(m) {
-  modo = m; $('mDni').classList.toggle('on', m === 'dni'); $('mCod').classList.toggle('on', m === 'cod');
-  $('q').maxLength = m === 'dni' ? 8 : 5; $('q').placeholder = m === 'dni' ? 'DNI' : 'últimos 5';
-  $('qHint').textContent = m === 'dni' ? 'Escribe el DNI. Si no está registrado, se pedirá su código Semana Civil (últimos 5 dígitos).'
-    : 'Últimos 5 dígitos del código Semana Civil (ej. SC3-EST-28718 → 28718).';
-  $('q').value = ''; $('cand').innerHTML = ''; setTimeout(() => $('q').focus(), 30);
+function setModo() {
+  modo = 'cod'; $('q').value = ''; $('cand').innerHTML = '';
+  if (!$('pMan').classList.contains('hide')) setTimeout(() => $('q').focus(), 30);
 }
 function manual() {
   const v = $('q').value.trim(); if (!v) return;
   $('q').value = ''; $('cand').innerHTML = '';
-  if (/^SC\d/i.test(v)) return porCodigo(v, 'manual');
+  if (/^SC\d/i.test(v)) return porCodigo(v, 'codigo');
   const dig = v.replace(/\D/g, '');
-  if (modo === 'dni') {
-    if (dig.length !== 8) return flash('BAD', '✖', 'DNI incompleto', 'El DNI tiene 8 dígitos.', []);
-    const p = porDni[dig];
-    if (p) return validar(p, 'dni');
-    return flash('ASK', '?', 'DNI no registrado', `El DNI ${dig} no está en la base de inscritos. Pídele los últimos 5 dígitos de su código Semana Civil.`,
-      [{ t: 'Ingresar código (5 dígitos)', w: true, f: () => setModo('cod') }]);
-  }
-  if (dig.length !== 5) return flash('BAD', '✖', 'Faltan dígitos', 'Escribe los últimos 5 dígitos del código.', []);
+  if (dig.length !== 5) return flash('BAD', '✖', 'Escribe 5 dígitos', 'Los últimos 5 dígitos del código Semana Civil (ya no se acepta DNI).', []);
   const cands = D.general.filter(p => p.c.endsWith(dig));
   if (!cands.length) return flash('BAD', '✖', 'Código no encontrado', `Ningún inscrito tiene un código que termine en ${dig}. Verifica su correo de inscripción.`, []);
   if (cands.length === 1) return validar(cands[0], 'codigo');
   $('cand').innerHTML = '<div class="hint">Hay varias coincidencias, toca la persona correcta:</div>' +
-    cands.map((p, i) => `<button data-i="${i}"><b>${p.n}</b><br><small>${p.c} ${p.d ? '· DNI ••••' + p.d.slice(-4) : ''}</small></button>`).join('');
+    cands.map((p, i) => `<button data-i="${i}"><b>${p.n}</b><br><small>${p.c}</small></button>`).join('');
   $('cand').querySelectorAll('button').forEach(b => b.onclick = () => { $('cand').innerHTML = ''; validar(cands[b.dataset.i], 'codigo'); });
 }
 function porCodigo(txt, origen) {
@@ -345,25 +369,37 @@ async function validar(p, origen) {
 
 /* ================= MARCAR ================= */
 function marcar(p, resultado, origen, obs) {
-  const ya = marcas.find(m => m.sesion === ses.id && m.codigo === p.c && m.resultado === 'OK');
-  if (ya && resultado === 'OK') return flash('DUP', '!', p.n, `Ya registrado en esta actividad a las ${ya.hora}${ya.encargado ? ' por ' + ya.encargado : ''}.`, []);
-  const now = new Date(), eq = equipoDe(p.c);
-  const m = { id: `${dev}-${now.getTime()}`, ts: now.toISOString(), hora: now.toTimeString().slice(0, 5), sesion: ses.id, actividad: ses.nombre,
-    codigo: p.c, dni: p.d || '', nombre: p.n, equipo: eq ? eq.e : '', resultado, obs: obs || '', origen,
-    encargado: LS.get('name', ''), dispositivo: dev, creditos: resultado === 'OK' ? ses.creditos : 0 };
-  if (!abierta(ses)) {
-    const quien = autVigente() ? NOMBRE_NIVEL[aut.nv] : NOMBRE_NIVEL[NIVEL] + ' ' + LS.get('name', '');
-    m.obs = 'Tardío · autorizó ' + quien + (m.obs ? ' · ' + m.obs : '');
-    if (autVigente()) { m.aut = aut.pin; m.autPor = quien; }
+  const eq = equipoDe(p.c);
+  if (ses.prueba) {
+    flash('OK', '✔', p.n, `${p.c}${p.h ? '' : ' · (sin QR en la base)'} · ${p.k || ''}`, [], 'PRUEBA · no se guardó');
+    return;
   }
-  marcas.push(m); LS.set('marcas', marcas.slice(-4000));
-  if (!DEMO) { cola.push(m); LS.set('cola', cola); subir(); }
+  const externo = (p.c.split('-')[1] || '').startsWith('X');
+  if (origen === 'codigo' && !ses.virtual && !externo) obs = 'Sin carnet' + (obs ? ' · ' + obs : '');
+  const lista = resultado === 'OK' ? objetivos(ses) : [ses];
+  const nuevas = lista.filter(s => !marcas.some(m => m.sesion === s.id && m.codigo === p.c && m.resultado === 'OK'));
+  if (resultado === 'OK' && !nuevas.length) {
+    const ya = marcas.find(m => m.sesion === ses.id && m.codigo === p.c && m.resultado === 'OK') || {};
+    return flash('DUP', '!', p.n, `Ya registrado${lista.length > 1 ? ' en estas actividades' : ' en esta actividad'}${ya.hora ? ' a las ' + ya.hora : ''}${ya.encargado ? ' por ' + ya.encargado : ''}.`, []);
+  }
+  const now = new Date(), tardio = !abierta(ses);
+  const quien = autVigente() ? NOMBRE_NIVEL[aut.nv] : NOMBRE_NIVEL[NIVEL] + ' ' + LS.get('name', '');
+  nuevas.forEach((s, i) => {
+    const m = { id: `${dev}-${now.getTime()}-${i}`, ts: now.toISOString(), hora: now.toTimeString().slice(0, 5), sesion: s.id, base: ses.id, actividad: s.nombre,
+      codigo: p.c, dni: '', nombre: p.n, equipo: eq ? eq.e : '', resultado, obs: (obs || '') + (s.id !== ses.id ? (obs ? ' · ' : '') + 'Escaneo en grupo (' + ses.id + ')' : ''), origen,
+      encargado: LS.get('name', ''), dispositivo: dev, creditos: resultado === 'OK' ? s.creditos : 0 };
+    if (tardio) { m.obs = 'Tardío · autorizó ' + quien + (m.obs ? ' · ' + m.obs : ''); if (autVigente()) { m.aut = aut.pin; m.autPor = quien; } }
+    marcas.push(m); if (!DEMO) cola.push(m);
+  });
+  LS.set('marcas', marcas.slice(-4000)); if (!DEMO) { LS.set('cola', cola); programarSubida(); }
   if (resultado === 'OK') {
-    const sub = eq ? (() => { const t = progreso(eq.e); return `${eq.e} · ${eq.en} · ${t.pres}/${t.tot} del equipo`; })() : p.c;
-    flash('OK', '✔', p.n, sub, [], `+${ses.creditos} créditos`);
+    const cr = nuevas.reduce((a, s) => a + s.creditos, 0);
+    const sub = (eq ? (() => { const t = progreso(eq.e); return `${eq.e} · ${eq.en} · ${t.pres}/${t.tot} del equipo`; })() : p.c)
+      + (nuevas.length > 1 ? ` · ${nuevas.length} actividades: ${nuevas.map(s => s.nombre.replace(/^.* - /, '')).join(' + ')}` : '')
+      + (obs && obs.startsWith('Sin carnet') ? ' · SIN CARNET' : '');
+    flash('OK', '✔', p.n, sub, [], `+${cr} créditos`);
   } else flash('DUP', '✔', 'Registrado como OBSERVADO', `${p.n} · no suma créditos`, []);
-  if (modo === 'cod') setModo('dni');
-  pintarTodo();
+  setModo(); pintarTodo();
 }
 
 /* ================= ANULAR (coordinador / admin) ================= */
@@ -391,7 +427,9 @@ function pintarTodo() {
   if (!ses) return;
   const pr = presentes(), eq = equipos();
   $('curName').innerHTML = `${chip(ses)} ${ses.nombre}`;
-  $('curMeta').textContent = `${ses.fecha} · ${ses.inicio}-${ses.fin}${ses.lugar ? ' · ' + ses.lugar : ''}${(ses.externos || []).length ? ' · admite externos de ' + ses.externos.map(x => EXT[x] || x).join(', ') : ''}`;
+  const ob = objetivos(ses);
+  $('curMeta').innerHTML = `${ses.fecha} · ${ses.inicio}-${ses.fin}${ses.lugar ? ' · ' + ses.lugar : ''}${ses.virtual ? ' · 💻 virtual' : ''}${(ses.externos || []).length && !ses.prueba ? ' · admite externos de ' + ses.externos.map(x => EXT[x] || x).join(', ') : ''}`
+    + (ob.length > 1 ? `<br><span class="grp">🔗 Un escaneo marca ${ob.length}: ${ob.map(s => s.nombre.replace(/^.* - /, '')).join(' + ')}</span>` : '');
   $('cnt').textContent = pr.size; $('cntLbl').textContent = 'presentes';
   $('tList').classList.toggle('hide', !eq.length);
   const mias = marcas.filter(m => m.sesion === ses.id).slice(-8).reverse();
@@ -410,6 +448,7 @@ function pintarTodo() {
 }
 function pintarRed() {
   const on = navigator.onLine;
+  if (ses && ses.prueba) { $('net').textContent = 'PRUEBA'; $('net').className = 'pill prueba'; return; }
   $('net').textContent = DEMO ? 'DEMO' : on ? 'En línea' : 'Sin internet';
   $('net').className = 'pill' + (DEMO ? ' demo' : on ? '' : ' off');
   $('pend').textContent = `${cola.length} por subir`; $('pend').classList.toggle('hide', DEMO || !cola.length);
@@ -435,7 +474,7 @@ function flash(tipo, ic, t, s, acciones, plus) {
   $('fAct').innerHTML = acts.map((a, i) => `<button data-i="${i}" class="${a.w ? 'w' : ''}">${a.t}</button>`).join('');
   $('fAct').querySelectorAll('button').forEach(b => b.onclick = e => { e.stopPropagation(); cerrar(); acts[b.dataset.i].f(); });
   clearTimeout(fT);
-  if (tipo === 'OK' || tipo === 'DUP') fT = setTimeout(cerrar, tipo === 'OK' ? 1500 : 2300);
+  if (tipo === 'OK' || tipo === 'DUP') fT = setTimeout(cerrar, tipo === 'OK' ? OK_MS : 2200);
   f.onclick = () => { if (tipo === 'OK' || tipo === 'DUP') cerrar(); };
 }
 function cerrar() { $('flash').className = ''; if (!$('pMan').classList.contains('hide')) $('q').focus(); }
@@ -445,16 +484,24 @@ async function camOn() {
   if (!window.Html5Qrcode) return flash('BAD', '✖', 'No cargó el lector', 'Revisa tu internet y recarga la página.', []);
   scanner = scanner || new Html5Qrcode('reader', { verbose: false });
   try {
-    await scanner.start({ facingMode: 'environment' }, { fps: 12, qrbox: (w, h) => ({ width: Math.min(w, h) * .75, height: Math.min(w, h) * .55 }) }, txt => {
-      const now = Date.now();
-      if ($('flash').classList.contains('show')) return;
-      if (txt === ultimoScan.c && now - ultimoScan.t < REPETIR_MS) return;
-      ultimoScan = { c: txt, t: now };
-      if (/^\d{8}$/.test(txt.trim()) && porDni[txt.trim()]) return validar(porDni[txt.trim()], 'qr');
-      porCodigo(txt, 'qr');
-    }, () => {});
-    $('camStart').classList.add('hide'); $('camStop').classList.remove('hide');
-  } catch (e) { flash('BAD', '✖', 'Sin acceso a la cámara', 'Da permiso de cámara al navegador o usa DNI / Código.', []); }
+    await scanner.start({ facingMode: 'environment' }, { fps: 15, qrbox: (w, h) => ({ width: Math.min(w, h) * .8, height: Math.min(w, h) * .8 }) }, leerQR, () => {});
+    $('camStart').classList.add('hide'); $('camStop').classList.remove('hide'); LS.set('cam', true);
+  } catch (e) { flash('BAD', '✖', 'Sin acceso a la cámara', 'Da permiso de cámara al navegador o usa Código.', []); }
+}
+async function leerQR(txt) {
+  const now = Date.now(), t = String(txt || '').trim();
+  if (procesando || $('flash').classList.contains('show') || $('auth').classList.contains('show')) return;
+  if (t === ultimoScan.c && now - ultimoScan.t < REPETIR_MS) return;
+  ultimoScan = { c: t, t: now }; procesando = true;
+  try {
+    if (/^C26-[A-Z0-9]{8}$/i.test(t)) {
+      const p = porHash[await huella(t)];
+      if (p) return validar(p, 'qr');
+      return flash('BAD', '✖', 'QR no reconocido', 'Es un QR de carnet, pero no está en la lista. Toca "Recargar datos"; si sigue, pide su código.', []);
+    }
+    if (/S?C\s*\d\s*-/i.test(t) || /^\d{8}$/.test(t)) return flash('BAD', '😏', VIVO, 'Ese QR lo hizo alguien con el código o el DNI. Solo vale el QR impreso en el carnet.', []);
+    flash('BAD', '✖', 'QR no válido', 'Este QR no es de un carnet de la Semana Civil.', []);
+  } finally { setTimeout(() => { procesando = false; }, 250); }
 }
 async function camOff() { try { await scanner.stop(); } catch (e) {} $('camStart').classList.remove('hide'); $('camStop').classList.add('hide'); }
 
@@ -463,17 +510,17 @@ function tab(n) {
   ['Man', 'Scan', 'List'].forEach(x => { $('t' + x).classList.toggle('on', x === n); $('p' + x).classList.toggle('hide', x !== n); });
   if (n !== 'Scan' && scanner && scanner.isScanning) camOff();
   if (n === 'Man') setTimeout(() => $('q').focus(), 50);
+  if (n === 'Scan' && scanner && !scanner.isScanning && LS.get('cam', false)) camOn();
 }
 $('tMan').onclick = () => tab('Man'); $('tScan').onclick = () => tab('Scan'); $('tList').onclick = () => tab('List');
-$('mDni').onclick = () => setModo('dni'); $('mCod').onclick = () => setModo('cod');
 $('camStart').onclick = camOn; $('camStop').onclick = camOff;
 $('qGo').onclick = manual;
 $('q').onkeydown = e => { if (e.key === 'Enter') manual(); };
 $('aPin').onkeydown = e => { if (e.key === 'Enter') $('aGo').click(); };
-$('q').oninput = () => { const d = $('q').value.replace(/\D/g, ''); if ((modo === 'dni' && d.length === 8) || (modo === 'cod' && d.length === 5)) manual(); };
+$('q').oninput = () => { const v = $('q').value.trim(); if (/^\d{5}$/.test(v)) manual(); };
 $('sesAll').onchange = e => e.target.value && usar(e.target.value);
-$('chg').onclick = e => { e.preventDefault(); pedirDatos(true).then(iniciar); };
-$('rel').onclick = async e => { e.preventDefault(); await iniciar(); };
+$('chg').onclick = e => { e.preventDefault(); pedirDatos(true).then(() => iniciar(true)); };
+$('rel').onclick = async e => { e.preventDefault(); await iniciar(true); };
 window.addEventListener('online', () => { pintarRed(); subir(); });
 window.addEventListener('offline', pintarRed);
 
@@ -493,20 +540,7 @@ function pedirDatos(forzar) {
   });
 }
 
-async function iniciar() {
-  $('ver').textContent = VERSION + (DEMO ? ' · DEMO (datos ficticios, no guarda)' : '');
-  await pedirDatos(false);
-  $('who').textContent = 'Encargado: ' + LS.get('name', '');
-  try { await cargar(); }
-  catch (e) {
-    const c = LS.get('cache', null);
-    if (c) { D = c; indexar(); flash('DUP', '!', 'Sin conexión', 'Usando la última lista descargada. Las marcas se subirán al volver el internet.', []); }
-    else {
-      $('sesTitle').textContent = 'No se pudo cargar la lista';
-      $('sesBtns').innerHTML = `<div class="hint" style="color:#b91c1c">${e.message}</div><button class="btn" style="width:100%;margin-top:8px" onclick="iniciar()">Reintentar</button>`;
-      flash('BAD', '✖', 'No se pudo cargar la lista', e.message + ' · Revisa el PIN o el internet.', [{ t: 'Cambiar PIN', w: true, f: () => pedirDatos(true).then(iniciar) }]); return;
-    }
-  }
+function mostrar() {
   if (!D.horario || !D.horario.length) {
     $('sesTitle').textContent = 'El HORARIO está vacío';
     $('sesBtns').innerHTML = '<div class="hint">Revisa la hoja HORARIO del Sheets (columna Activo = Sí) y toca Recargar datos.</div>';
@@ -514,10 +548,31 @@ async function iniciar() {
   }
   $('who').textContent = NOMBRE_NIVEL[NIVEL] + ': ' + LS.get('name', '');
   $('lvl').textContent = NOMBRE_NIVEL[NIVEL]; $('lvl').classList.toggle('hide', NIVEL === 'enc');
-  ses = elegirInicial();
-  pintarSesiones(); pintarTodo(); pintarRed(); setModo('dni');
+  const prev = ses && (ses.prueba ? ses : D.horario.find(s => s.id === ses.id));
+  ses = prev || elegirInicial();
+  pintarSesiones(); pintarTodo(); pintarRed(); ajustarModo(); setModo();
 }
-setInterval(() => { subir(); if (D) pintarSesiones(); }, 15000);
+async function iniciar(fresh) {
+  $('ver').textContent = VERSION + (DEMO ? ' · DEMO (datos ficticios, no guarda)' : '');
+  await pedirDatos(false);
+  $('who').textContent = 'Encargado: ' + LS.get('name', '');
+  // 1) abre al instante con la última lista guardada en este celular
+  const c = !DEMO && !fresh && LS.get('cache', null);
+  if (c && c.general && c.general.length && c.general[0].h !== undefined) {
+    D = c; NIVEL = LS.get('nivel', 'enc'); indexar(); mostrar(); $('loading').classList.remove('show');
+  } else { $('loadTxt').textContent = fresh ? 'Recargando datos…' : 'Cargando lista… (la primera vez del día tarda unos segundos)'; $('loading').classList.add('show'); }
+  // 2) actualiza en segundo plano
+  try { await cargar(fresh); indexar(); mostrar(); }
+  catch (e) {
+    if (D) { if (!c) flash('DUP', '!', 'Sin conexión', 'Usando la última lista descargada. Las marcas se subirán al volver el internet.', []); }
+    else {
+      $('sesTitle').textContent = 'No se pudo cargar la lista';
+      $('sesBtns').innerHTML = `<div class="hint" style="color:#b91c1c">${e.message}</div><button class="btn" style="width:100%;margin-top:8px" onclick="iniciar(true)">Reintentar</button>`;
+      flash('BAD', '✖', 'No se pudo cargar la lista', e.message + ' · Revisa el PIN o el internet.', [{ t: 'Cambiar PIN', w: true, f: () => pedirDatos(true).then(() => iniciar(true)) }]);
+    }
+  } finally { $('loading').classList.remove('show'); }
+}
+setInterval(() => { subir(); if (D && ses) pintarSesiones(); }, 15000);
 iniciar();
 </script>
 </body>
